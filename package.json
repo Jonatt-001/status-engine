@@ -1,0 +1,15 @@
+{
+  "name": "dyve-status-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Independent automatic status engine and public status page for Dyve.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "check": "node server.js --once"
+  },
+  "dependencies": {}
+}
