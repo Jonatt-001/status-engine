@@ -1,55 +1,101 @@
+"use strict";
+
+/* =========================================================
+   DYVE PUBLIC STATUS ENGINE
+   Synced specifically with index.html
+========================================================= */
+
 const STATUS_API = "https://status.dyve.online/api/status";
 
 const REFRESH_INTERVAL = 60 * 1000;
+const CLOCK_INTERVAL = 1000;
+const MAX_EVENTS = 30;
+const AVAILABILITY_DAYS = 30;
 
-const statusCopy = {
+let latestData = null;
+let lastFetchDuration = null;
+let refreshInProgress = false;
+let bootComplete = false;
+
+const eventHistory = [];
+
+
+/* =========================================================
+   STATUS DEFINITIONS
+========================================================= */
+
+const STATUS_COPY = {
+
   operational: {
-    title: "All systems operational",
-    description: "All monitored Dyve services are responding normally.",
+    title: "ALL SYSTEMS OPERATIONAL",
+    description:
+      "All monitored DYVE services are responding normally.",
     className: "operational"
   },
 
   degraded: {
-    title: "Some systems are degraded",
-    description: "One or more monitored services are experiencing reduced availability.",
+    title: "SOME SYSTEMS ARE DEGRADED",
+    description:
+      "One or more monitored services are experiencing reduced availability.",
     className: "warning"
   },
 
   major_outage: {
-    title: "A service disruption is active",
-    description: "One or more monitored services are currently unavailable.",
+    title: "A SERVICE DISRUPTION IS ACTIVE",
+    description:
+      "One or more monitored services are currently unavailable.",
     className: "danger"
   },
 
   unknown: {
-    title: "Monitor unavailable",
+    title: "MONITOR UNAVAILABLE",
     description:
-      "The public status monitor could not verify service health. No service state is being fabricated.",
+      "The monitoring engine could not verify service health. No service state is being fabricated.",
     className: "unknown"
   }
+
 };
 
 
 /* =========================================================
-   HELPERS
+   DOM HELPERS
 ========================================================= */
 
+function $(id) {
+  return document.getElementById(id);
+}
+
+
+function setText(id, value) {
+
+  const element = $(id);
+
+  if (!element) {
+    return;
+  }
+
+  element.textContent = value ?? "";
+
+}
+
+
 function escapeHtml(value) {
+
   return String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+
 }
 
 
-function getElement(id) {
-  return document.getElementById(id);
-}
+/* =========================================================
+   TIME
+========================================================= */
 
-
-function formatTime(value) {
+function formatDate(value) {
 
   if (!value) {
     return "—";
@@ -65,26 +111,32 @@ function formatTime(value) {
     dateStyle: "medium",
     timeStyle: "short"
   }).format(date);
+
 }
 
 
-function formatTimeShort(value) {
+function formatClock(value = new Date()) {
 
-  if (!value) {
-    return "—";
-  }
-
-  const date = new Date(value);
+  const date =
+    value instanceof Date
+      ? value
+      : new Date(value);
 
   if (Number.isNaN(date.getTime())) {
-    return "—";
+    return "00:00:00 UTC";
   }
 
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  }).format(date);
+  const hours =
+    String(date.getUTCHours()).padStart(2, "0");
+
+  const minutes =
+    String(date.getUTCMinutes()).padStart(2, "0");
+
+  const seconds =
+    String(date.getUTCSeconds()).padStart(2, "0");
+
+  return `${hours}:${minutes}:${seconds} UTC`;
+
 }
 
 
@@ -94,71 +146,101 @@ function formatRelative(value) {
     return "never";
   }
 
-  const time = new Date(value).getTime();
+  const timestamp =
+    new Date(value).getTime();
 
-  if (!Number.isFinite(time)) {
+  if (!Number.isFinite(timestamp)) {
     return "never";
   }
 
-  const seconds = Math.max(
-    0,
-    Math.floor(
-      (Date.now() - time) / 1000
-    )
-  );
-
+  const seconds =
+    Math.max(
+      0,
+      Math.floor(
+        (Date.now() - timestamp) / 1000
+      )
+    );
 
   if (seconds < 60) {
     return `${seconds}s ago`;
   }
 
-
   const minutes =
     Math.floor(seconds / 60);
-
 
   if (minutes < 60) {
     return `${minutes}m ago`;
   }
 
-
   const hours =
     Math.floor(minutes / 60);
-
 
   if (hours < 24) {
     return `${hours}h ago`;
   }
 
+  const days =
+    Math.floor(hours / 24);
 
-  return `${Math.floor(hours / 24)}d ago`;
-}
-
-
-function statusLabel(status) {
-
-  return {
-
-    operational:
-      "Operational",
-
-    degraded:
-      "Degraded",
-
-    major_outage:
-      "Major outage",
-
-    unknown:
-      "Collecting data"
-
-  }[status] || "Unknown";
+  return `${days}d ago`;
 
 }
 
+
+function formatDurationFromNow(value) {
+
+  if (!value) {
+    return "—";
+  }
+
+  const timestamp =
+    new Date(value).getTime();
+
+  if (!Number.isFinite(timestamp)) {
+    return "—";
+  }
+
+  const seconds =
+    Math.max(
+      0,
+      Math.floor(
+        (Date.now() - timestamp) / 1000
+      )
+    );
+
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+
+  const minutes =
+    Math.floor(seconds / 60);
+
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+
+  const hours =
+    Math.floor(minutes / 60);
+
+  if (hours < 24) {
+    return `${hours}h`;
+  }
+
+  return `${Math.floor(hours / 24)}d`;
+
+}
+
+
+/* =========================================================
+   STATUS NORMALIZATION
+========================================================= */
 
 function normalizeStatus(status) {
 
-  if (!status) {
+  if (
+    status === null ||
+    status === undefined
+  ) {
     return "unknown";
   }
 
@@ -172,25 +254,23 @@ function normalizeStatus(status) {
 
   if (
     normalized === "operational" ||
-    normalized === "up" ||
     normalized === "healthy" ||
     normalized === "online" ||
-    normalized === "ok"
+    normalized === "up" ||
+    normalized === "ok" ||
+    normalized === "success"
   ) {
-
     return "operational";
-
   }
 
 
   if (
     normalized === "degraded" ||
     normalized === "warning" ||
-    normalized === "partial"
+    normalized === "partial" ||
+    normalized === "slow"
   ) {
-
     return "degraded";
-
   }
 
 
@@ -199,58 +279,370 @@ function normalizeStatus(status) {
     normalized === "outage" ||
     normalized === "down" ||
     normalized === "offline" ||
-    normalized === "critical"
+    normalized === "critical" ||
+    normalized === "failed" ||
+    normalized === "failure"
   ) {
-
     return "major_outage";
-
   }
 
 
   return "unknown";
+
 }
 
 
-function uptimeLabel(value) {
+function statusLabel(status) {
 
-  if (
-    value === null ||
-    value === undefined ||
-    value === "" ||
-    !Number.isFinite(Number(value))
-  ) {
+  const normalized =
+    normalizeStatus(status);
 
+  return {
+
+    operational: "Operational",
+    degraded: "Degraded",
+    major_outage: "Major outage",
+    unknown: "Unknown"
+
+  }[normalized];
+
+}
+
+
+/* =========================================================
+   NUMBERS
+========================================================= */
+
+function isNumber(value) {
+
+  return (
+    value !== null &&
+    value !== undefined &&
+    value !== "" &&
+    Number.isFinite(
+      Number(value)
+    )
+  );
+
+}
+
+
+function formatPercentage(value) {
+
+  if (!isNumber(value)) {
     return "—";
-
   }
-
 
   return `${Number(value).toFixed(2)}%`;
+
 }
 
 
-function responseLabel(value) {
+function formatLatency(value) {
 
-  if (
-    value === null ||
-    value === undefined ||
-    value === "" ||
-    !Number.isFinite(Number(value))
-  ) {
-
+  if (!isNumber(value)) {
     return "—";
+  }
+
+  return `${Math.round(Number(value))}ms`;
+
+}
+
+
+function padNumber(value, length = 2) {
+
+  return String(
+    Number(value) || 0
+  ).padStart(
+    length,
+    "0"
+  );
+
+}
+
+
+/* =========================================================
+   ARRAY / OBJECT NORMALIZATION
+========================================================= */
+
+function normalizeService(service, index) {
+
+  const source =
+    service &&
+    typeof service === "object"
+      ? service
+      : {};
+
+
+  return {
+
+    id:
+      source.id ||
+      source.slug ||
+      source.key ||
+      `service-${index + 1}`,
+
+    name:
+      source.name ||
+      source.shortName ||
+      source.title ||
+      `Service ${index + 1}`,
+
+    shortName:
+      source.shortName ||
+      source.name ||
+      source.title ||
+      `Service ${index + 1}`,
+
+    description:
+      source.description ||
+      "Monitored DYVE service.",
+
+    status:
+      normalizeStatus(
+        source.status
+      ),
+
+    responseTime:
+      isNumber(source.responseTime)
+        ? Number(source.responseTime)
+        : null,
+
+    httpStatus:
+      isNumber(source.httpStatus)
+        ? Number(source.httpStatus)
+        : null,
+
+    uptime:
+      isNumber(source.uptime)
+        ? Number(source.uptime)
+        : null,
+
+    lastChecked:
+      source.lastChecked ||
+      source.checkedAt ||
+      source.lastProbe ||
+      null,
+
+    lastSuccess:
+      source.lastSuccess ||
+      null,
+
+    heartbeat:
+      source.heartbeat ||
+      null,
+
+    availability:
+      source.availability ||
+      source.history ||
+      null,
+
+    history:
+      source.history ||
+      null,
+
+    region:
+      source.region ||
+      source.identifier ||
+      source.origin ||
+      "01"
+
+  };
+
+}
+
+
+function normalizeIncident(incident, index) {
+
+  const source =
+    incident &&
+    typeof incident === "object"
+      ? incident
+      : {};
+
+
+  return {
+
+    id:
+      source.id ||
+      `incident-${index + 1}`,
+
+    title:
+      source.title ||
+      source.name ||
+      "Service incident",
+
+    details:
+      source.details ||
+      source.description ||
+      "Health checks are reporting an issue.",
+
+    status:
+      normalizeStatus(
+        source.status
+      ),
+
+    startedAt:
+      source.startedAt ||
+      source.started ||
+      source.createdAt ||
+      null,
+
+    resolvedAt:
+      source.resolvedAt ||
+      source.resolved ||
+      source.closedAt ||
+      null
+
+  };
+
+}
+
+
+/* =========================================================
+   PAYLOAD NORMALIZATION
+========================================================= */
+
+function normalizePayload(raw) {
+
+  const data =
+    raw &&
+    typeof raw === "object"
+      ? raw
+      : {};
+
+
+  const services =
+    Array.isArray(data.services)
+      ? data.services.map(
+          normalizeService
+        )
+      : [];
+
+
+  const incidents =
+    Array.isArray(data.incidents)
+      ? data.incidents.map(
+          normalizeIncident
+        )
+      : [];
+
+
+  let overallStatus =
+    data.overallStatus
+      ? normalizeStatus(
+          data.overallStatus
+        )
+      : null;
+
+
+  /*
+     Only derive an overall status if the API did not
+     explicitly provide one.
+
+     This prevents the frontend from turning an explicit
+     "unknown" state into "operational".
+  */
+
+  if (!overallStatus) {
+
+    overallStatus =
+      deriveOverallStatus(
+        services
+      );
 
   }
 
 
-  return `${Math.round(Number(value))}ms`;
+  return {
+
+    schemaVersion:
+      data.schemaVersion ||
+      null,
+
+    generatedAt:
+      data.generatedAt ||
+      null,
+
+    monitoredAt:
+      data.monitoredAt ||
+      data.generatedAt ||
+      null,
+
+    overallStatus,
+
+    services,
+
+    incidents,
+
+    raw: data
+
+  };
+
 }
 
 
-function countByStatus(services) {
+/* =========================================================
+   OVERALL STATUS
+========================================================= */
+
+function deriveOverallStatus(services) {
+
+  if (!services.length) {
+    return "unknown";
+  }
+
+
+  const statuses =
+    services.map(
+      service =>
+        normalizeStatus(
+          service.status
+        )
+    );
+
+
+  if (
+    statuses.includes(
+      "major_outage"
+    )
+  ) {
+    return "major_outage";
+  }
+
+
+  if (
+    statuses.includes(
+      "degraded"
+    )
+  ) {
+    return "degraded";
+  }
+
+
+  if (
+    statuses.every(
+      status =>
+        status === "operational"
+    )
+  ) {
+    return "operational";
+  }
+
+
+  return "unknown";
+
+}
+
+
+/* =========================================================
+   SUMMARY CALCULATIONS
+========================================================= */
+
+function getServiceCounts(services) {
 
   return services.reduce(
-    (counts, service) => {
+    (result, service) => {
 
       const status =
         normalizeStatus(
@@ -258,27 +650,36 @@ function countByStatus(services) {
         );
 
 
-      counts.total++;
+      result.total++;
 
 
-      if (status === "operational") {
-        counts.operational++;
+      if (
+        status ===
+        "operational"
+      ) {
+        result.operational++;
       }
 
-      else if (status === "degraded") {
-        counts.degraded++;
+      else if (
+        status ===
+        "degraded"
+      ) {
+        result.degraded++;
       }
 
-      else if (status === "major_outage") {
-        counts.outage++;
+      else if (
+        status ===
+        "major_outage"
+      ) {
+        result.outage++;
       }
 
       else {
-        counts.unknown++;
+        result.unknown++;
       }
 
 
-      return counts;
+      return result;
 
     },
     {
@@ -293,293 +694,274 @@ function countByStatus(services) {
 }
 
 
-/* =========================================================
-   API NORMALIZATION
-========================================================= */
+function calculateAverageUptime(services) {
 
-function normalizeService(service) {
-
-  return {
-
-    id:
-      service.id ||
-      "",
-
-    name:
-      service.name ||
-      service.shortName ||
-      "Unnamed service",
-
-    shortName:
-      service.shortName ||
-      service.name ||
-      "Service",
-
-    description:
-      service.description ||
-      "Monitored Dyve service.",
-
-    status:
-      normalizeStatus(
-        service.status
-      ),
-
-    responseTime:
-      service.responseTime ??
-      null,
-
-    httpStatus:
-      service.httpStatus ??
-      null,
-
-    lastChecked:
-      service.lastChecked ||
-      null,
-
-    lastSuccess:
-      service.lastSuccess ||
-      null,
-
-    uptime:
-      service.uptime ??
-      null,
-
-    heartbeat:
-      service.heartbeat ||
-      {}
-
-  };
-
-}
-
-
-function normalizeIncident(incident) {
-
-  return {
-
-    id:
-      incident.id ||
-      "",
-
-    title:
-      incident.title ||
-      incident.name ||
-      "Service incident",
-
-    details:
-      incident.details ||
-      incident.description ||
-      "Health checks are reporting an issue.",
-
-    startedAt:
-      incident.startedAt ||
-      incident.createdAt ||
-      incident.started ||
-      null,
-
-    resolvedAt:
-      incident.resolvedAt ||
-      incident.closedAt ||
-      null
-
-  };
-
-}
-
-
-function normalizePayload(data) {
-
-  const services =
-    Array.isArray(data?.services)
-      ? data.services.map(
-          normalizeService
-        )
-      : [];
-
-
-  const incidents =
-    Array.isArray(data?.incidents)
-      ? data.incidents.map(
-          normalizeIncident
-        )
-      : [];
-
-
-  let overallStatus =
-    normalizeStatus(
-      data?.overallStatus
-    );
-
-
-  /*
-     If the API explicitly says "unknown",
-     we do not invent an operational state.
-
-     However, if overallStatus is missing entirely,
-     we can safely derive it from actual service states.
-  */
-
-  if (
-    !data?.overallStatus &&
-    services.length
-  ) {
-
-    const counts =
-      countByStatus(
-        services
+  const values =
+    services
+      .map(
+        service =>
+          Number(service.uptime)
+      )
+      .filter(
+        value =>
+          Number.isFinite(value)
       );
 
 
-    if (counts.outage > 0) {
+  if (!values.length) {
+    return null;
+  }
 
-      overallStatus =
-        "major_outage";
 
-    }
+  return (
+    values.reduce(
+      (sum, value) =>
+        sum + value,
+      0
+    ) / values.length
+  );
 
-    else if (counts.degraded > 0) {
+}
 
-      overallStatus =
-        "degraded";
 
-    }
+function calculateMedianLatency(services) {
 
-    else if (
-      counts.operational ===
+  const values =
+    services
+      .map(
+        service =>
+          Number(service.responseTime)
+      )
+      .filter(
+        value =>
+          Number.isFinite(value)
+      )
+      .sort(
+        (a, b) =>
+          a - b
+      );
+
+
+  if (!values.length) {
+    return null;
+  }
+
+
+  const middle =
+    Math.floor(
+      values.length / 2
+    );
+
+
+  if (
+    values.length % 2 ===
+    0
+  ) {
+
+    return (
+      values[middle - 1] +
+      values[middle]
+    ) / 2;
+
+  }
+
+
+  return values[middle];
+
+}
+
+
+/* =========================================================
+   GLOBAL OVERVIEW
+========================================================= */
+
+function renderGlobalState(data) {
+
+  const status =
+    normalizeStatus(
+      data.overallStatus
+    );
+
+
+  const copy =
+    STATUS_COPY[status] ||
+    STATUS_COPY.unknown;
+
+
+  setText(
+    "globalState",
+    copy.title
+  );
+
+
+  setText(
+    "globalSub",
+    copy.description
+  );
+
+
+  const indicator =
+    $("globalIndicator");
+
+
+  if (indicator) {
+
+    indicator.className =
+      `overview-status-indicator ${copy.className}`;
+
+  }
+
+
+  document.body.dataset.status =
+    status;
+
+}
+
+
+/* =========================================================
+   METRICS
+========================================================= */
+
+function renderMetrics(data) {
+
+  const services =
+    data.services;
+
+
+  const counts =
+    getServiceCounts(
+      services
+    );
+
+
+  const uptime =
+    calculateAverageUptime(
+      services
+    );
+
+
+  const latency =
+    calculateMedianLatency(
+      services
+    );
+
+
+  const errorRate =
+    uptime === null
+      ? null
+      : Math.max(
+          0,
+          100 - uptime
+        );
+
+
+  setText(
+    "uptimeMetric",
+    formatPercentage(
+      uptime
+    )
+  );
+
+
+  setText(
+    "latencyMetric",
+    formatLatency(
+      latency
+    )
+  );
+
+
+  setText(
+    "errorMetric",
+    formatPercentage(
+      errorRate
+    )
+  );
+
+
+  setText(
+    "nodeMetric",
+    `${padNumber(counts.operational)} / ${padNumber(counts.total)}`
+  );
+
+
+  setText(
+    "incidentMetric",
+    padNumber(
+      data.incidents.length
+    )
+  );
+
+
+  setText(
+    "serviceCount",
+    padNumber(
       counts.total
-    ) {
+    )
+  );
 
-      overallStatus =
-        "operational";
+
+  const serviceMeta =
+    $("serviceMeta");
+
+
+  if (serviceMeta) {
+
+    if (!counts.total) {
+
+      serviceMeta.textContent =
+        "0 SERVICES / WAITING";
 
     }
 
     else {
 
-      overallStatus =
-        "unknown";
+      serviceMeta.textContent =
+        `${padNumber(counts.total)} SERVICES / LIVE`;
 
     }
 
   }
 
 
-  return {
-
-    schemaVersion:
-      data?.schemaVersion ||
-      null,
-
-    generatedAt:
-      data?.generatedAt ||
-      null,
-
-    monitoredAt:
-      data?.monitoredAt ||
-      data?.generatedAt ||
-      null,
-
-    overallStatus,
-
-    services,
-
-    incidents
-
-  };
-
-}
+  setText(
+    "checksPassed",
+    padNumber(
+      counts.total
+    )
+  );
 
 
-/* =========================================================
-   OVERALL STATE
-========================================================= */
-
-function renderOverall(data) {
-
-  const copy =
-    statusCopy[
-      data.overallStatus
-    ] ||
-    statusCopy.unknown;
+  setText(
+    "requestsMinute",
+    padNumber(
+      counts.operational
+    )
+  );
 
 
-  const title =
-    getElement(
-      "overallTitle"
-    );
+  setText(
+    "p95",
+    padNumber(
+      counts.degraded
+    )
+  );
 
 
-  const description =
-    getElement(
-      "overallDescription"
-    );
+  setText(
+    "p99",
+    padNumber(
+      counts.outage
+    )
+  );
 
 
-  const lastChecked =
-    getElement(
-      "lastChecked"
-    );
-
-
-  const mark =
-    getElement(
-      "overallMark"
-    );
-
-
-  if (title) {
-
-    title.textContent =
-      copy.title;
-
-  }
-
-
-  if (description) {
-
-    description.textContent =
-      copy.description;
-
-  }
-
-
-  if (lastChecked) {
-
-    lastChecked.textContent =
-      formatTime(
-        data.monitoredAt
-      );
-
-  }
-
-
-  if (mark) {
-
-    mark.className =
-      `overall-mark ${copy.className}`;
-
-  }
-
-
-  /*
-     Optional elements supported if they exist
-     in the HTML.
-  */
-
-  const state =
-    getElement(
-      "overallState"
-    );
-
-
-  if (state) {
-
-    state.textContent =
-      statusLabel(
-        data.overallStatus
-      );
-
-  }
+  setText(
+    "errorBudget",
+    padNumber(
+      counts.unknown
+    )
+  );
 
 }
 
@@ -588,12 +970,118 @@ function renderOverall(data) {
    SERVICE MATRIX
 ========================================================= */
 
-function renderServices(services) {
+function serviceSymbolSvg(service) {
+
+  const name =
+    String(
+      service.name
+    ).toLowerCase();
+
+
+  if (
+    name.includes("api")
+  ) {
+
+    return `
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+      >
+        <path d="M8 9l-4 3 4 3"/>
+        <path d="M16 9l4 3-4 3"/>
+        <path d="M14 5l-4 14"/>
+      </svg>
+    `;
+
+  }
+
+
+  if (
+    name.includes("database") ||
+    name.includes("db")
+  ) {
+
+    return `
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+      >
+        <ellipse cx="12" cy="5" rx="7" ry="3"/>
+        <path d="M5 5v7c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/>
+        <path d="M5 12v7c0 1.7 3.1 3 7 3s7-1.3 7-3v-7"/>
+      </svg>
+    `;
+
+  }
+
+
+  if (
+    name.includes("auth") ||
+    name.includes("identity")
+  ) {
+
+    return `
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+      >
+        <rect x="5" y="10" width="14" height="10" rx="1"/>
+        <path d="M8 10V7a4 4 0 018 0v3"/>
+        <circle cx="12" cy="15" r="1"/>
+      </svg>
+    `;
+
+  }
+
+
+  if (
+    name.includes("media") ||
+    name.includes("image") ||
+    name.includes("cdn")
+  ) {
+
+    return `
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+      >
+        <rect x="4" y="4" width="16" height="16" rx="1"/>
+        <circle cx="9" cy="9" r="1.5"/>
+        <path d="M4 17l5-5 3 3 2-2 6 5"/>
+      </svg>
+    `;
+
+  }
+
+
+  return `
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+    >
+      <rect x="4" y="4" width="16" height="16" rx="2"/>
+      <path d="M8 12h8"/>
+      <path d="M12 8v8"/>
+    </svg>
+  `;
+
+}
+
+
+function renderServiceMatrix(services) {
 
   const container =
-    getElement(
-      "services"
-    );
+    $("serviceMatrix");
 
 
   if (!container) {
@@ -604,9 +1092,8 @@ function renderServices(services) {
   if (!services.length) {
 
     container.innerHTML = `
-      <div class="empty-state">
-        <strong>No services available</strong>
-        <span>The monitoring engine has not returned any service data yet.</span>
+      <div class="incident-empty">
+        No service telemetry is currently available.
       </div>
     `;
 
@@ -617,7 +1104,7 @@ function renderServices(services) {
 
   container.innerHTML =
     services.map(
-      service => {
+      (service, index) => {
 
         const status =
           normalizeStatus(
@@ -625,90 +1112,112 @@ function renderServices(services) {
           );
 
 
-        const checked =
-          formatRelative(
-            service.lastChecked
-          );
-
-
-        const response =
-          responseLabel(
+        const latency =
+          formatLatency(
             service.responseTime
           );
 
 
         const uptime =
-          uptimeLabel(
+          formatPercentage(
             service.uptime
           );
 
 
-        const http =
-          service.httpStatus !== null &&
-          service.httpStatus !== undefined
-            ? `HTTP ${escapeHtml(service.httpStatus)}`
-            : "HTTP —";
+        const checked =
+          service.lastChecked
+            ? formatRelative(
+                service.lastChecked
+              )
+            : "not checked";
+
+
+        const identifier =
+          service.id ||
+          `service-${index + 1}`;
 
 
         return `
 
           <article
-            class="service"
-            data-service-status="${escapeHtml(status)}"
+            class="service-row"
+            data-service-id="${escapeHtml(identifier)}"
+            tabindex="0"
+            role="button"
+            aria-label="View telemetry for ${escapeHtml(service.name)}"
           >
 
-            <span
-              class="service-dot ${escapeHtml(status)}"
-            ></span>
+            <div class="service-name-cell">
 
-
-            <div class="service-main">
-
-              <div class="service-name">
-                ${escapeHtml(service.name)}
+              <div class="service-symbol">
+                ${serviceSymbolSvg(service)}
               </div>
 
-              <div class="service-description">
-                ${escapeHtml(service.description)}
+              <div>
+
+                <div class="service-name">
+                  ${escapeHtml(service.name)}
+                </div>
+
+                <div class="service-id">
+                  ${escapeHtml(service.description)}
+                </div>
+
               </div>
 
             </div>
 
 
-            <div class="service-right">
+            <div class="service-state">
 
-              <div
-                class="service-status ${escapeHtml(status)}"
-              >
-                ${escapeHtml(
-                  statusLabel(status)
-                )}
+              <span
+                class="health-dot ${escapeHtml(status)}"
+              ></span>
+
+              ${escapeHtml(
+                statusLabel(status)
+              )}
+
+            </div>
+
+
+            <div class="service-data">
+
+              <div class="service-data-item">
+
+                <div class="service-data-label">
+                  Latency
+                </div>
+
+                <div class="service-data-value">
+                  ${escapeHtml(latency)}
+                </div>
+
               </div>
 
 
-              <div class="service-metrics">
+              <div class="service-data-item">
 
-                ${
-                  response === "—"
-                    ? "Response —"
-                    : escapeHtml(response)
-                }
+                <div class="service-data-label">
+                  Uptime
+                </div>
 
-                · checked
-                ${escapeHtml(checked)}
+                <div class="service-data-value ${status === "operational" ? "green" : ""}">
+                  ${escapeHtml(uptime)}
+                </div>
 
               </div>
 
 
-              <div class="service-secondary">
+              <div class="service-data-item">
 
-                ${escapeHtml(http)}
+                <div class="service-data-label">
+                  Last check
+                </div>
 
-                ${
-                  uptime !== "—"
-                    ? ` · ${escapeHtml(uptime)} uptime`
-                    : ""
-                }
+                <div class="service-data-value">
+                  ${escapeHtml(checked)}
+                </div>
 
               </div>
 
@@ -721,19 +1230,164 @@ function renderServices(services) {
       }
     ).join("");
 
+
+  container
+    .querySelectorAll(
+      ".service-row"
+    )
+    .forEach(
+      row => {
+
+        const open =
+          () => {
+
+            const service =
+              latestData?.services?.find(
+                item =>
+                  String(item.id) ===
+                  String(
+                    row.dataset.serviceId
+                  )
+              );
+
+
+            if (service) {
+              openServiceModal(
+                service
+              );
+            }
+
+          };
+
+
+        row.addEventListener(
+          "click",
+          open
+        );
+
+
+        row.addEventListener(
+          "keydown",
+          event => {
+
+            if (
+              event.key ===
+              "Enter" ||
+              event.key ===
+              " "
+            ) {
+
+              event.preventDefault();
+
+              open();
+
+            }
+
+          }
+        );
+
+      }
+    );
+
 }
 
 
 /* =========================================================
-   UPTIME
+   AVAILABILITY HISTORY
 ========================================================= */
 
-function renderUptime(services) {
+function normalizeAvailabilityHistory(service) {
+
+  const candidates = [
+
+    service.availability,
+
+    service.history,
+
+    service.heartbeat?.history,
+
+    service.heartbeat?.daily,
+
+    service.heartbeat?.availability,
+
+    service.heartbeat
+
+  ];
+
+
+  for (
+    const candidate of candidates
+  ) {
+
+    if (
+      Array.isArray(candidate) &&
+      candidate.length
+    ) {
+
+      return candidate;
+
+    }
+
+
+    if (
+      candidate &&
+      typeof candidate === "object"
+    ) {
+
+      const values =
+        Object.entries(
+          candidate
+        );
+
+
+      if (values.length) {
+
+        return values.map(
+          ([date, value]) => ({
+            date,
+            value
+          })
+        );
+
+      }
+
+    }
+
+  }
+
+
+  return [];
+
+}
+
+
+function normalizeAvailabilityStatus(value) {
+
+  if (
+    value &&
+    typeof value === "object"
+  ) {
+
+    return normalizeStatus(
+      value.status ||
+      value.state ||
+      value.result
+    );
+
+  }
+
+
+  return normalizeStatus(
+    value
+  );
+
+}
+
+
+function renderAvailability(services) {
 
   const container =
-    getElement(
-      "uptimeGrid"
-    );
+    $("availabilityMatrix");
 
 
   if (!container) {
@@ -744,8 +1398,14 @@ function renderUptime(services) {
   if (!services.length) {
 
     container.innerHTML = `
-      <div class="history-empty">
-        Uptime data is not currently available.
+      <div style="
+        padding:18px 0;
+        color:rgba(216,246,228,.45);
+        font-family:var(--sans);
+        font-size:8px;
+        line-height:1.6;
+      ">
+        Availability history will appear when the monitoring engine provides historical probe data.
       </div>
     `;
 
@@ -758,45 +1418,125 @@ function renderUptime(services) {
     services.map(
       service => {
 
-        const status =
-          normalizeStatus(
-            service.status
+        const history =
+          normalizeAvailabilityHistory(
+            service
           );
 
 
-        const uptime =
-          uptimeLabel(
-            service.uptime
+        const recent =
+          history.slice(
+            -AVAILABILITY_DAYS
           );
 
 
-        const uptimeNote =
-          uptime === "—"
-            ? "No verified uptime data"
-            : "Measured from real health checks";
+        const bars = [];
+
+
+        for (
+          let index = 0;
+          index < AVAILABILITY_DAYS;
+          index++
+        ) {
+
+          const item =
+            recent[
+              index -
+              (
+                AVAILABILITY_DAYS -
+                recent.length
+              )
+            ];
+
+
+          if (!item) {
+
+            bars.push(`
+              <span
+                class="availability-bar unknown"
+                title="No historical data"
+              ></span>
+            `);
+
+            continue;
+
+          }
+
+
+          const status =
+            normalizeAvailabilityStatus(
+              item
+            );
+
+
+          const value =
+            item &&
+            typeof item === "object"
+              ? item.value ??
+                item.uptime ??
+                item.status ??
+                item.state
+              : item;
+
+
+          const strong =
+            isNumber(value) &&
+            Number(value) >= 99.5
+              ? "strong"
+              : "";
+
+
+          const date =
+            item &&
+            typeof item === "object"
+              ? item.date ||
+                item.timestamp ||
+                item.time
+              : null;
+
+
+          bars.push(`
+            <span
+              class="availability-bar ${escapeHtml(status)} ${strong}"
+              data-date="${escapeHtml(date || "")}"
+              data-service="${escapeHtml(service.name)}"
+              data-status="${escapeHtml(status)}"
+              title="${escapeHtml(
+                date
+                  ? `${formatDate(date)} · ${statusLabel(status)}`
+                  : statusLabel(status)
+              )}"
+            ></span>
+          `);
+
+        }
 
 
         return `
 
-          <article
-            class="uptime-card ${escapeHtml(status)}"
-          >
+          <div class="availability-row">
 
-            <div class="uptime-label">
-              ${escapeHtml(service.shortName)}
+            <div class="availability-name">
+              ${escapeHtml(
+                service.shortName
+              )}
             </div>
 
 
-            <div class="uptime-value">
-              ${escapeHtml(uptime)}
+            <div class="availability-bars">
+              ${bars.join("")}
             </div>
 
 
-            <div class="uptime-note">
-              ${escapeHtml(uptimeNote)}
+            <div class="availability-value">
+              ${escapeHtml(
+                formatPercentage(
+                  service.uptime
+                )
+              )}
             </div>
 
-          </article>
+          </div>
 
         `;
 
@@ -807,155 +1547,222 @@ function renderUptime(services) {
 
 
 /* =========================================================
-   INCIDENTS
+   EVENT STREAM
 ========================================================= */
 
-function renderIncidents(incidents) {
+function addEvent(
+  type,
+  target,
+  result,
+  tone = "",
+  timestamp = new Date()
+) {
 
-  const panel =
-    getElement(
-      "incidentPanel"
-    );
+  eventHistory.unshift({
+
+    id:
+      `${Date.now()}-${Math.random()}`,
+
+    time:
+      timestamp instanceof Date
+        ? timestamp
+        : new Date(timestamp),
+
+    type,
+    target,
+    result,
+    tone
+
+  });
 
 
-  const list =
-    getElement(
-      "incidents"
-    );
+  if (
+    eventHistory.length >
+    MAX_EVENTS
+  ) {
+
+    eventHistory.length =
+      MAX_EVENTS;
+
+  }
+
+}
 
 
-  const count =
-    getElement(
-      "incidentCount"
-    );
+function buildEventsFromData(data) {
+
+  const now =
+    new Date();
 
 
-  if (count) {
+  addEvent(
+    "SYNC",
+    "STATUS ENGINE",
+    "RECEIVED",
+    "operational",
+    now
+  );
 
-    count.textContent =
-      String(
-        incidents.length
+
+  data.services.forEach(
+    service => {
+
+      const status =
+        normalizeStatus(
+          service.status
+        );
+
+
+      addEvent(
+        "PROBE",
+        service.name,
+        statusLabel(
+          status
+        ).toUpperCase(),
+        status === "operational"
+          ? "operational"
+          : status === "degraded"
+            ? "warning"
+            : status === "major_outage"
+              ? "danger"
+              : ""
       );
+
+    }
+  );
+
+
+  data.incidents
+    .slice(0, 5)
+    .forEach(
+      incident => {
+
+        addEvent(
+          "INCIDENT",
+          incident.title,
+          "ACTIVE",
+          "danger",
+          incident.startedAt
+            ? new Date(
+                incident.startedAt
+              )
+            : now
+        );
+
+      }
+    );
+
+}
+
+
+function renderEventStream() {
+
+  const container =
+    $("eventStream");
+
+
+  if (!container) {
+    return;
+  }
+
+
+  const events =
+    eventHistory
+      .slice(
+        0,
+        MAX_EVENTS
+      );
+
+
+  setText(
+    "eventCount",
+    padNumber(
+      events.length
+    )
+  );
+
+
+  if (!events.length) {
+
+    container.innerHTML = `
+      <div class="incident-empty">
+        Waiting for live monitoring activity.
+      </div>
+    `;
+
+    return;
 
   }
 
 
-  if (!list) {
+  container.innerHTML =
+    events.map(
+      event => {
+
+        const time =
+          event.time instanceof Date &&
+          !Number.isNaN(
+            event.time.getTime()
+          )
+            ? formatClock(
+                event.time
+              ).replace(
+                " UTC",
+                ""
+              )
+            : "--:--:--";
+
+
+        return `
+
+          <div class="event">
+
+            <div class="event-time">
+              ${escapeHtml(time)}
+            </div>
+
+            <div class="event-type">
+              ${escapeHtml(event.type)}
+            </div>
+
+            <div class="event-target">
+              ${escapeHtml(event.target)}
+            </div>
+
+            <div class="event-result ${escapeHtml(event.tone)}">
+              ${escapeHtml(event.result)}
+            </div>
+
+          </div>
+
+        `;
+
+      }
+    ).join("");
+
+}
+
+
+/* =========================================================
+   INCIDENT LEDGER
+========================================================= */
+
+function renderIncidentLedger(incidents) {
+
+  const container =
+    $("incidentLedger");
+
+
+  if (!container) {
     return;
   }
 
 
   if (!incidents.length) {
 
-    if (panel) {
-
-      panel.classList.add(
-        "hidden"
-      );
-
-    }
-
-
-    list.innerHTML = `
-      <div class="history-empty">
-        No active incidents have been reported by the monitor.
-      </div>
-    `;
-
-    return;
-
-  }
-
-
-  if (panel) {
-
-    panel.classList.remove(
-      "hidden"
-    );
-
-  }
-
-
-  list.innerHTML =
-    incidents.map(
-      incident => `
-
-        <article class="incident-card">
-
-          <div class="incident-title">
-            ${escapeHtml(
-              incident.title
-            )}
-          </div>
-
-
-          <div class="incident-detail">
-            ${escapeHtml(
-              incident.details
-            )}
-          </div>
-
-
-          <div class="incident-time">
-            Started
-            ${escapeHtml(
-              formatTime(
-                incident.startedAt
-              )
-            )}
-          </div>
-
-        </article>
-
-      `
-    ).join("");
-
-}
-
-
-/* =========================================================
-   INCIDENT HISTORY
-========================================================= */
-
-function renderHistory(incidents) {
-
-  const container =
-    getElement(
-      "incidentHistory"
-    );
-
-
-  if (!container) {
-    return;
-  }
-
-
-  const history =
-    incidents
-      .filter(
-        incident =>
-          incident.resolvedAt
-      )
-      .sort(
-        (a, b) =>
-          new Date(
-            b.startedAt
-          ) -
-          new Date(
-            a.startedAt
-          )
-      )
-      .slice(
-        0,
-        10
-      );
-
-
-  if (!history.length) {
-
     container.innerHTML = `
-      <div class="history-empty">
-        No resolved incidents have been recorded by this monitor yet.
+      <div class="incident-empty">
+        No incidents have been reported by the monitor.
       </div>
     `;
 
@@ -965,485 +1772,1191 @@ function renderHistory(incidents) {
 
 
   container.innerHTML =
-    history.map(
-      incident => `
+    incidents.map(
+      incident => {
 
-        <article class="history-item">
+        const status =
+          normalizeStatus(
+            incident.status
+          );
 
-          <span class="history-icon"></span>
+
+        const tone =
+          status === "major_outage"
+            ? "danger"
+            : status === "degraded"
+              ? "warning"
+              : "";
 
 
-          <div>
+        return `
 
-            <div class="history-title">
-              ${escapeHtml(
-                incident.title
-              )}
+          <article class="incident">
+
+            <span
+              class="incident-marker ${tone}"
+            ></span>
+
+
+            <div class="incident-date">
+
+              ${
+                incident.startedAt
+                  ? escapeHtml(
+                      formatDate(
+                        incident.startedAt
+                      )
+                    )
+                  : "Date unavailable"
+              }
+
             </div>
 
 
-            <div class="history-meta">
+            <div>
 
-              ${escapeHtml(
-                formatTime(
-                  incident.startedAt
-                )
-              )}
+              <div class="incident-description">
 
-              →
+                ${escapeHtml(
+                  incident.title
+                )}
 
-              ${escapeHtml(
-                formatTime(
-                  incident.resolvedAt
-                )
-              )}
+              </div>
+
+
+              <div
+                style="
+                  color:var(--muted);
+                  font-family:var(--sans);
+                  font-size:7px;
+                  line-height:1.45;
+                  margin-top:4px;
+                "
+              >
+
+                ${escapeHtml(
+                  incident.details
+                )}
+
+              </div>
 
             </div>
 
-          </div>
 
+            <div
+              class="incident-state ${incident.resolvedAt ? "" : tone}"
+            >
 
-          <div class="history-state">
-            Resolved
-          </div>
+              ${
+                incident.resolvedAt
+                  ? "Resolved"
+                  : "Active"
+              }
 
-        </article>
+            </div>
 
-      `
+          </article>
+
+        `;
+
+      }
     ).join("");
 
 }
 
 
 /* =========================================================
-   SUMMARY METRICS
+   MONITOR TELEMETRY
 ========================================================= */
 
-function renderSummary(data) {
+function renderMonitorTelemetry(data) {
 
   const services =
-    data.services || [];
+    data.services;
 
 
   const counts =
-    countByStatus(
+    getServiceCounts(
       services
     );
 
 
-  const serviceCount =
-    getElement(
-      "serviceCount"
+  const monitorStatus =
+    normalizeStatus(
+      data.overallStatus
     );
 
 
-  const operationalCount =
-    getElement(
-      "operationalCount"
+  if (!lastFetchDuration) {
+
+    setText(
+      "nodeLatency",
+      "--ms"
     );
 
+  }
 
-  const degradedCount =
-    getElement(
-      "degradedCount"
+  else {
+
+    setText(
+      "nodeLatency",
+      `${Math.round(lastFetchDuration)}ms`
     );
 
-
-  const outageCount =
-    getElement(
-      "outageCount"
-    );
-
-
-  const unknownCount =
-    getElement(
-      "unknownCount"
-    );
-
-
-  const activeIncidentCount =
-    getElement(
-      "activeIncidentCount"
-    );
-
-
-  if (serviceCount) {
-
-    serviceCount.textContent =
-      String(
-        counts.total
-      ).padStart(
-        2,
-        "0"
-      );
-
   }
 
 
-  if (operationalCount) {
-
-    operationalCount.textContent =
-      String(
-        counts.operational
-      ).padStart(
-        2,
-        "0"
-      );
-
-  }
+  setText(
+    "nodeStatus",
+    monitorStatus === "unknown"
+      ? "REACHABLE"
+      : "ONLINE"
+  );
 
 
-  if (degradedCount) {
-
-    degradedCount.textContent =
-      String(
-        counts.degraded
-      ).padStart(
-        2,
-        "0"
-      );
-
-  }
+  setText(
+    "cycleStatus",
+    services.length
+      ? "ACTIVE"
+      : "WAITING"
+  );
 
 
-  if (outageCount) {
-
-    outageCount.textContent =
-      String(
-        counts.outage
-      ).padStart(
-        2,
-        "0"
-      );
-
-  }
+  setText(
+    "cycleAge",
+    data.monitoredAt
+      ? `${formatDurationFromNow(data.monitoredAt)} ago`
+      : "--"
+  );
 
 
-  if (unknownCount) {
-
-    unknownCount.textContent =
-      String(
-        counts.unknown
-      ).padStart(
-        2,
-        "0"
-      );
-
-  }
+  setText(
+    "monitorState",
+    services.length
+      ? "ONLINE"
+      : "WAITING"
+  );
 
 
-  if (activeIncidentCount) {
-
-    activeIncidentCount.textContent =
-      String(
-        data.incidents.length
-      ).padStart(
-        2,
-        "0"
-      );
-
-  }
-
-}
+  setText(
+    "checksHour",
+    "60s"
+  );
 
 
-/* =========================================================
-   LATEST PROBE
-========================================================= */
-
-function renderLatestProbe(data) {
-
-  const services =
-    data.services || [];
-
-
-  const probe =
-    getElement(
-      "latestProbe"
-    );
-
-
-  if (!probe) {
-    return;
-  }
-
-
-  if (!services.length) {
-
-    probe.innerHTML = `
-      <div class="probe-status unknown">
-        NO DATA
-      </div>
-
-      <div class="probe-description">
-        The monitoring engine has not returned service telemetry.
-      </div>
-    `;
-
-    return;
-
-  }
+  setText(
+    "serviceCount",
+    padNumber(
+      counts.total
+    )
+  );
 
 
   const latest =
     [...services]
+      .filter(
+        service =>
+          service.lastChecked
+      )
       .sort(
-        (a, b) => {
-
-          const aTime =
-            new Date(
-              a.lastChecked || 0
-            ).getTime();
-
-
-          const bTime =
-            new Date(
-              b.lastChecked || 0
-            ).getTime();
-
-
-          return bTime - aTime;
-
-        }
+        (a, b) =>
+          new Date(
+            b.lastChecked
+          ) -
+          new Date(
+            a.lastChecked
+          )
       )[0];
 
 
-  const status =
+  if (!latest) {
+
+    setText(
+      "probeResult",
+      "NO DATA"
+    );
+
+
+    setText(
+      "latestCheck",
+      "No verified service probe is currently available."
+    );
+
+    return;
+
+  }
+
+
+  const latestStatus =
     normalizeStatus(
       latest.status
     );
 
 
-  const response =
-    responseLabel(
-      latest.responseTime
-    );
+  setText(
+    "probeResult",
+    statusLabel(
+      latestStatus
+    ).toUpperCase()
+  );
 
 
-  const checked =
-    formatTime(
-      latest.lastChecked
-    );
+  setText(
+    "latestCheck",
+    `${latest.name} · ${formatLatency(latest.responseTime)} · checked ${formatDate(latest.lastChecked)}`
+  );
 
 
-  probe.innerHTML = `
-
-    <div class="probe-status ${escapeHtml(status)}">
-
-      ${escapeHtml(
-        statusLabel(status).toUpperCase()
-      )}
-
-    </div>
+  const probeResult =
+    $("probeResult");
 
 
-    <div class="probe-description">
+  if (probeResult) {
 
-      ${escapeHtml(
-        latest.name
-      )}
+    probeResult.style.color =
+      latestStatus === "major_outage"
+        ? "var(--red)"
+        : latestStatus === "degraded"
+          ? "var(--amber)"
+          : latestStatus === "operational"
+            ? "var(--green-700)"
+            : "var(--muted)";
 
-      ·
-
-      ${escapeHtml(
-        response
-      )}
-
-      · checked
-
-      ${escapeHtml(
-        checked
-      )}
-
-    </div>
-
-  `;
+  }
 
 }
 
 
 /* =========================================================
-   MONITOR STATUS
+   SCAN STATUS
 ========================================================= */
 
-function renderMonitorState(data) {
+function renderScanStatus(data) {
 
-  const monitor =
-    getElement(
-      "monitorState"
+  const counts =
+    getServiceCounts(
+      data.services
     );
 
 
-  if (!monitor) {
-    return;
-  }
+  if (!data.services.length) {
 
-
-  const hasServices =
-    data.services.length > 0;
-
-
-  const hasRecentTelemetry =
-    data.services.some(
-      service =>
-        service.lastChecked
+    setText(
+      "scanText",
+      "WAITING FOR SERVICE TELEMETRY"
     );
 
+    return;
 
-  if (!hasServices) {
+  }
 
-    monitor.textContent =
-      "OFFLINE";
+
+  if (
+    counts.unknown ===
+    counts.total
+  ) {
+
+    setText(
+      "scanText",
+      "MONITOR REACHABLE · SERVICE TELEMETRY UNVERIFIED"
+    );
 
     return;
 
   }
 
 
-  if (!hasRecentTelemetry) {
-
-    monitor.textContent =
-      "WAITING";
-
-    return;
-
-  }
-
-
-  monitor.textContent =
-    "ACTIVE";
+  setText(
+    "scanText",
+    `LIVE MONITORING · ${counts.operational}/${counts.total} SERVICES OPERATIONAL`
+  );
 
 }
 
 
 /* =========================================================
-   LOAD STATUS
+   LAST CHECK TIMESTAMP
+========================================================= */
+
+function renderLastChecked(data) {
+
+  const timestamp =
+    data.monitoredAt;
+
+
+  if (!timestamp) {
+    return;
+  }
+
+
+  const clock =
+    $("systemClock");
+
+
+  if (clock) {
+
+    clock.title =
+      `Last monitor synchronization: ${formatDate(timestamp)}`;
+
+  }
+
+}
+
+
+/* =========================================================
+   SERVICE MODAL
+========================================================= */
+
+function openServiceModal(service) {
+
+  const layer =
+    $("modalLayer");
+
+
+  if (!layer) {
+    return;
+  }
+
+
+  const status =
+    normalizeStatus(
+      service.status
+    );
+
+
+  setText(
+    "modalService",
+    service.name
+  );
+
+
+  setText(
+    "modalState",
+    statusLabel(
+      status
+    ).toUpperCase()
+  );
+
+
+  setText(
+    "modalLatency",
+    formatLatency(
+      service.responseTime
+    )
+  );
+
+
+  setText(
+    "modalUptime",
+    formatPercentage(
+      service.uptime
+    )
+  );
+
+
+  setText(
+    "modalChecks",
+    service.httpStatus
+      ? `HTTP ${service.httpStatus}`
+      : "—"
+  );
+
+
+  setText(
+    "modalRegion",
+    service.id
+  );
+
+
+  setText(
+    "modalLastCheck",
+    formatDate(
+      service.lastChecked
+    )
+  );
+
+
+  setText(
+    "modalDescription",
+    service.description ||
+      "Live service telemetry provided by the DYVE monitoring engine."
+  );
+
+
+  const dot =
+    $("modalDot");
+
+
+  if (dot) {
+
+    dot.className =
+      `health-dot ${status}`;
+
+  }
+
+
+  const state =
+    $("modalState");
+
+
+  if (state) {
+
+    state.style.color =
+      status === "major_outage"
+        ? "var(--red)"
+        : status === "degraded"
+          ? "var(--amber)"
+          : status === "operational"
+            ? "var(--green-700)"
+            : "var(--muted)";
+
+  }
+
+
+  layer.classList.add(
+    "visible"
+  );
+
+
+  document.body.style.overflow =
+    "hidden";
+
+}
+
+
+function closeModal(event) {
+
+  if (
+    event &&
+    event.target &&
+    event.target.id !==
+      "modalLayer"
+  ) {
+
+    return;
+
+  }
+
+
+  const layer =
+    $("modalLayer");
+
+
+  if (layer) {
+
+    layer.classList.remove(
+      "visible"
+    );
+
+  }
+
+
+  document.body.style.overflow =
+    "";
+
+}
+
+
+window.closeModal =
+  closeModal;
+
+
+/* =========================================================
+   TOOLTIP
+========================================================= */
+
+function initAvailabilityTooltip() {
+
+  const container =
+    $("availabilityMatrix");
+
+
+  const tooltip =
+    $("tooltip");
+
+
+  if (
+    !container ||
+    !tooltip
+  ) {
+    return;
+  }
+
+
+  container.addEventListener(
+    "pointerover",
+    event => {
+
+      const bar =
+        event.target.closest(
+          ".availability-bar"
+        );
+
+
+      if (!bar) {
+        return;
+      }
+
+
+      setText(
+        "tooltipDate",
+        bar.dataset.date
+          ? formatDate(
+              bar.dataset.date
+            )
+          : "Historical data unavailable"
+      );
+
+
+      setText(
+        "tooltipTitle",
+        bar.dataset.service ||
+          "Service"
+      );
+
+
+      const tooltipStatus =
+        $("tooltipStatus");
+
+
+      if (tooltipStatus) {
+
+        tooltipStatus.textContent =
+          statusLabel(
+            bar.dataset.status
+          );
+
+
+        tooltipStatus.className =
+          `tooltip-status ${bar.dataset.status}`;
+
+      }
+
+
+      tooltip.classList.add(
+        "visible"
+      );
+
+    }
+  );
+
+
+  container.addEventListener(
+    "pointermove",
+    event => {
+
+      if (
+        !tooltip.classList.contains(
+          "visible"
+        )
+      ) {
+        return;
+      }
+
+
+      positionTooltip(
+        event.clientX,
+        event.clientY
+      );
+
+    }
+  );
+
+
+  container.addEventListener(
+    "pointerout",
+    event => {
+
+      if (
+        event.target.closest(
+          ".availability-bar"
+        )
+      ) {
+
+        tooltip.classList.remove(
+          "visible"
+        );
+
+      }
+
+    }
+  );
+
+}
+
+
+function positionTooltip(
+  x,
+  y
+) {
+
+  const tooltip =
+    $("tooltip");
+
+
+  if (!tooltip) {
+    return;
+  }
+
+
+  const padding =
+    12;
+
+
+  const rect =
+    tooltip.getBoundingClientRect();
+
+
+  let left =
+    x + 14;
+
+
+  let top =
+    y + 14;
+
+
+  if (
+    left + rect.width >
+    window.innerWidth - padding
+  ) {
+
+    left =
+      x -
+      rect.width -
+      14;
+
+  }
+
+
+  if (
+    top + rect.height >
+    window.innerHeight - padding
+  ) {
+
+    top =
+      y -
+      rect.height -
+      14;
+
+  }
+
+
+  tooltip.style.left =
+    `${Math.max(padding, left)}px`;
+
+  tooltip.style.top =
+    `${Math.max(padding, top)}px`;
+
+}
+
+
+/* =========================================================
+   CLOCK
+========================================================= */
+
+function updateClock() {
+
+  setText(
+    "systemClock",
+    formatClock()
+  );
+
+}
+
+
+/* =========================================================
+   BOOT SEQUENCE
+========================================================= */
+
+function runBootSequence() {
+
+  const boot =
+    $("boot");
+
+
+  const progress =
+    $("bootProgress");
+
+
+  if (!boot) {
+
+    bootComplete =
+      true;
+
+    return;
+
+  }
+
+
+  const lines =
+    Array.from(
+      boot.querySelectorAll(
+        ".boot-line"
+      )
+    );
+
+
+  const total =
+    lines.length;
+
+
+  lines.forEach(
+    line =>
+      line.classList.remove(
+        "visible"
+      )
+  );
+
+
+  lines.forEach(
+    (line, index) => {
+
+      setTimeout(
+        () => {
+
+          line.classList.add(
+            "visible"
+          );
+
+
+          if (progress) {
+
+            const percent =
+              ((index + 1) / total) *
+              100;
+
+
+            progress.style.width =
+              `${percent}%`;
+
+          }
+
+        },
+        260 +
+        index * 330
+      );
+
+    }
+  );
+
+
+  const completionDelay =
+    260 +
+    total * 330 +
+    700;
+
+
+  setTimeout(
+    () => {
+
+      boot.classList.add(
+        "complete"
+      );
+
+
+      bootComplete =
+        true;
+
+
+      setTimeout(
+        () => {
+
+          boot.remove();
+
+        },
+        800
+      );
+
+    },
+    completionDelay
+  );
+
+}
+
+
+/* =========================================================
+   API REQUEST
+========================================================= */
+
+async function fetchStatus() {
+
+  const started =
+    performance.now();
+
+
+  const response =
+    await fetch(
+      `${STATUS_API}?t=${Date.now()}`,
+      {
+        method: "GET",
+
+        cache: "no-store",
+
+        headers: {
+          "Accept":
+            "application/json",
+
+          "Cache-Control":
+            "no-cache"
+        }
+      }
+    );
+
+
+  lastFetchDuration =
+    performance.now() -
+    started;
+
+
+  if (!response.ok) {
+
+    throw new Error(
+      `Status API returned HTTP ${response.status}`
+    );
+
+  }
+
+
+  const contentType =
+    response.headers.get(
+      "content-type"
+    ) || "";
+
+
+  if (
+    !contentType.includes(
+      "application/json"
+    )
+  ) {
+
+    throw new Error(
+      "Status API did not return JSON."
+    );
+
+  }
+
+
+  const raw =
+    await response.json();
+
+
+  return normalizePayload(
+    raw
+  );
+
+}
+
+
+/* =========================================================
+   CONNECTION ERROR STATE
+========================================================= */
+
+function renderConnectionError(error) {
+
+  console.error(
+    "[DYVE STATUS]",
+    error
+  );
+
+
+  latestData =
+    null;
+
+
+  setText(
+    "globalState",
+    "MONITOR UNAVAILABLE"
+  );
+
+
+  setText(
+    "globalSub",
+    "The public status monitor could not be reached. Service health cannot currently be verified."
+  );
+
+
+  const indicator =
+    $("globalIndicator");
+
+
+  if (indicator) {
+
+    indicator.className =
+      "overview-status-indicator unknown";
+
+  }
+
+
+  setText(
+    "uptimeMetric",
+    "—"
+  );
+
+
+  setText(
+    "latencyMetric",
+    "—"
+  );
+
+
+  setText(
+    "errorMetric",
+    "—"
+  );
+
+
+  setText(
+    "nodeMetric",
+    "— / —"
+  );
+
+
+  setText(
+    "incidentMetric",
+    "—"
+  );
+
+
+  setText(
+    "serviceMeta",
+    "MONITOR UNAVAILABLE"
+  );
+
+
+  setText(
+    "nodeStatus",
+    "UNREACHABLE"
+  );
+
+
+  setText(
+    "nodeLatency",
+    "—ms"
+  );
+
+
+  setText(
+    "cycleStatus",
+    "ERROR"
+  );
+
+
+  setText(
+    "cycleAge",
+    "—"
+  );
+
+
+  setText(
+    "monitorState",
+    "OFFLINE"
+  );
+
+
+  setText(
+    "probeResult",
+    "NO DATA"
+  );
+
+
+  setText(
+    "latestCheck",
+    "The monitoring engine could not be reached. No synthetic service state has been applied."
+  );
+
+
+  setText(
+    "scanText",
+    "STATUS ENGINE UNREACHABLE · TELEMETRY UNAVAILABLE"
+  );
+
+
+  setText(
+    "serviceCount",
+    "—"
+  );
+
+
+  setText(
+    "checksPassed",
+    "—"
+  );
+
+
+  setText(
+    "requestsMinute",
+    "—"
+  );
+
+
+  setText(
+    "p95",
+    "—"
+  );
+
+
+  setText(
+    "p99",
+    "—"
+  );
+
+
+  setText(
+    "errorBudget",
+    "—"
+  );
+
+
+  const matrix =
+    $("serviceMatrix");
+
+
+  if (matrix) {
+
+    matrix.innerHTML = `
+      <div class="incident-empty">
+        The monitoring engine did not return service telemetry.
+      </div>
+    `;
+
+  }
+
+
+  const availability =
+    $("availabilityMatrix");
+
+
+  if (availability) {
+
+    availability.innerHTML = `
+      <div style="
+        padding:18px 0;
+        color:rgba(216,246,228,.45);
+        font-family:var(--sans);
+        font-size:8px;
+        line-height:1.6;
+      ">
+        Historical availability cannot be verified while the status engine is unreachable.
+      </div>
+    `;
+
+  }
+
+
+  const incidents =
+    $("incidentLedger");
+
+
+  if (incidents) {
+
+    incidents.innerHTML = `
+      <div class="incident-empty">
+        Incident data unavailable while monitor is offline.
+      </div>
+    `;
+
+  }
+
+
+  const events =
+    $("eventStream");
+
+
+  if (events) {
+
+    events.innerHTML = `
+      <div class="incident-empty">
+        Unable to receive live monitoring events.
+      </div>
+    `;
+
+  }
+
+
+  setText(
+    "eventCount",
+    "00"
+  );
+
+}
+
+
+/* =========================================================
+   MAIN LOAD
 ========================================================= */
 
 async function loadStatus() {
 
-  const requestUrl =
-    `${STATUS_API}?t=${Date.now()}`;
+  if (refreshInProgress) {
+    return null;
+  }
+
+
+  refreshInProgress =
+    true;
 
 
   try {
 
-    const response =
-      await fetch(
-        requestUrl,
-        {
-          method: "GET",
-
-          cache:
-            "no-store",
-
-          headers: {
-            "Accept":
-              "application/json"
-          }
-        }
-      );
-
-
-    if (!response.ok) {
-
-      throw new Error(
-        `Status API returned HTTP ${response.status}`
-      );
-
-    }
-
-
-    const raw =
-      await response.json();
-
-
     const data =
-      normalizePayload(
-        raw
-      );
+      await fetchStatus();
 
 
-    /*
-       The API has responded successfully.
-       Render the actual state it returned.
-    */
+    latestData =
+      data;
 
-    renderOverall(
+
+    renderGlobalState(
       data
     );
 
 
-    renderServices(
+    renderMetrics(
+      data
+    );
+
+
+    renderServiceMatrix(
       data.services
     );
 
 
-    renderUptime(
+    renderAvailability(
       data.services
     );
 
 
-    renderIncidents(
+    renderIncidentLedger(
       data.incidents
     );
 
 
-    renderHistory(
-      data.incidents
-    );
-
-
-    renderSummary(
+    renderMonitorTelemetry(
       data
     );
 
 
-    renderLatestProbe(
+    renderScanStatus(
       data
     );
 
 
-    renderMonitorState(
+    renderLastChecked(
       data
     );
+
+
+    buildEventsFromData(
+      data
+    );
+
+
+    renderEventStream();
 
 
     /*
-       Optional timestamp elements.
+       Refresh service telemetry age on every cycle.
     */
-
-    const generatedAt =
-      getElement(
-        "generatedAt"
-      );
-
-
-    if (generatedAt) {
-
-      generatedAt.textContent =
-        formatTime(
-          data.generatedAt
-        );
-
-    }
-
-
-    const schemaVersion =
-      getElement(
-        "schemaVersion"
-      );
-
-
-    if (schemaVersion) {
-
-      schemaVersion.textContent =
-        data.schemaVersion
-          ? `v${data.schemaVersion}`
-          : "—";
-
-    }
-
 
     return data;
 
@@ -1451,234 +2964,194 @@ async function loadStatus() {
 
   catch (error) {
 
-    console.error(
-      "[DYVE STATUS]",
+    renderConnectionError(
       error
     );
-
-
-    /*
-       IMPORTANT:
-       Do not label the platform itself as down merely because
-       the status API cannot be reached.
-
-       The monitor is unavailable.
-       That is different from the monitored services being down.
-    */
-
-    const title =
-      getElement(
-        "overallTitle"
-      );
-
-
-    const description =
-      getElement(
-        "overallDescription"
-      );
-
-
-    const lastChecked =
-      getElement(
-        "lastChecked"
-      );
-
-
-    const mark =
-      getElement(
-        "overallMark"
-      );
-
-
-    if (title) {
-
-      title.textContent =
-        "Monitor unavailable";
-
-    }
-
-
-    if (description) {
-
-      description.textContent =
-        "The public status monitor could not be reached. Service health cannot currently be verified.";
-
-    }
-
-
-    if (lastChecked) {
-
-      lastChecked.textContent =
-        "Connection failed";
-
-    }
-
-
-    if (mark) {
-
-      mark.className =
-        "overall-mark unknown";
-
-    }
-
-
-    const services =
-      getElement(
-        "services"
-      );
-
-
-    if (services) {
-
-      services.innerHTML = `
-        <div class="empty-state">
-          <strong>Monitoring data unavailable</strong>
-          <span>
-            The status engine did not return live service telemetry.
-            No service is being incorrectly marked operational.
-          </span>
-        </div>
-      `;
-
-    }
-
-
-    const uptime =
-      getElement(
-        "uptimeGrid"
-      );
-
-
-    if (uptime) {
-
-      uptime.innerHTML = `
-        <div class="history-empty">
-          Uptime cannot be verified while the monitor is unavailable.
-        </div>
-      `;
-
-    }
-
-
-    const latestProbe =
-      getElement(
-        "latestProbe"
-      );
-
-
-    if (latestProbe) {
-
-      latestProbe.innerHTML = `
-        <div class="probe-status unknown">
-          NO DATA
-        </div>
-
-        <div class="probe-description">
-          The monitoring engine could not be reached.
-        </div>
-      `;
-
-    }
-
-
-    const monitor =
-      getElement(
-        "monitorState"
-      );
-
-
-    if (monitor) {
-
-      monitor.textContent =
-        "OFFLINE";
-
-    }
 
 
     return null;
 
   }
 
+  finally {
+
+    refreshInProgress =
+      false;
+
+  }
+
 }
 
 
 /* =========================================================
-   MANUAL REFRESH
+   MANUAL REFRESH SUPPORT
 ========================================================= */
 
 async function refresh() {
 
-  const button =
-    getElement(
-      "refreshButton"
-    );
-
-
-  if (button) {
-
-    button.disabled =
-      true;
-
-    button.textContent =
-      "Checking...";
-
+  if (refreshInProgress) {
+    return;
   }
 
 
-  try {
-
+  const result =
     await loadStatus();
 
+
+  if (result) {
+
+    showToast(
+      "Status synchronized"
+    );
+
   }
 
-  finally {
+  else {
 
-    if (button) {
-
-      button.disabled =
-        false;
-
-      button.textContent =
-        "Refresh";
-
-    }
+    showToast(
+      "Monitor connection failed"
+    );
 
   }
 
 }
+
+
+window.refreshStatus =
+  refresh;
+
+
+/* =========================================================
+   TOAST
+========================================================= */
+
+let toastTimer =
+  null;
+
+
+function showToast(message) {
+
+  const toast =
+    $("toast");
+
+
+  if (!toast) {
+    return;
+  }
+
+
+  toast.textContent =
+    message;
+
+
+  toast.classList.add(
+    "visible"
+  );
+
+
+  clearTimeout(
+    toastTimer
+  );
+
+
+  toastTimer =
+    setTimeout(
+      () => {
+
+        toast.classList.remove(
+          "visible"
+        );
+
+      },
+      2200
+    );
+
+}
+
+
+/* =========================================================
+   KEYBOARD
+========================================================= */
+
+document.addEventListener(
+  "keydown",
+  event => {
+
+    if (
+      event.key ===
+      "Escape"
+    ) {
+
+      closeModal();
+
+    }
+
+  }
+);
 
 
 /* =========================================================
    INITIALIZATION
 ========================================================= */
 
-document.addEventListener(
-  "DOMContentLoaded",
-  () => {
+function initializeStatusPage() {
 
-    const button =
-      getElement(
-        "refreshButton"
-      );
+  updateClock();
 
 
-    if (button) {
+  setInterval(
+    updateClock,
+    CLOCK_INTERVAL
+  );
 
-      button.addEventListener(
-        "click",
-        refresh
-      );
 
+  runBootSequence();
+
+
+  initAvailabilityTooltip();
+
+
+  /*
+     Start the first API synchronization immediately.
+     It runs independently from the visual boot sequence.
+  */
+
+  loadStatus();
+
+
+  /*
+     Re-check every minute.
+  */
+
+  setInterval(
+    loadStatus,
+    REFRESH_INTERVAL
+  );
+
+}
+
+
+/* =========================================================
+   START
+========================================================= */
+
+if (
+  document.readyState ===
+  "loading"
+) {
+
+  document.addEventListener(
+    "DOMContentLoaded",
+    initializeStatusPage,
+    {
+      once: true
     }
+  );
 
+}
 
-    loadStatus();
+else {
 
+  initializeStatusPage();
 
-    setInterval(
-      loadStatus,
-      REFRESH_INTERVAL
-    );
-
-  }
-);
+}
